@@ -1,0 +1,248 @@
+version: "3.9"
+
+services:
+  frontend:
+    image: dawn07/foodrec-fe:secured
+    container_name: foodrec_frontend
+    expose:
+      - 80
+    restart: unless-stopped
+    networks:
+      - internet
+    labels:
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN_FRONTEND}`)"
+      - "traefik.http.routers.frontend.entrypoints=https"
+      - "traefik.http.routers.frontend.tls=true"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.frontend.service=frontend"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+  reverse-proxy:
+    image: traefik:v2.10
+    container_name: traefik
+    restart: unless-stopped
+    command: 
+      - "--entrypoints.http.address=:80"
+      - "--entrypoints.https.address=:443"
+      - "--api.insecure=false"
+      - "--api.dashboard=true"
+      - "--providers.docker"
+      - "--providers.docker.watch"
+      - "--api=true"
+      - "--log=true"
+      - "--log.filePath=/logs/traefik.log"
+      - "--log.level=DEBUG"
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0"
+      - "--accessLog=true"
+      - "--accessLog.filePath=/logs/access.log"
+      - "--accessLog.filters.statusCodes=204-299,400-499,500-599"
+      - "--certificatesresolvers.letsencrypt.acme.email=${CF_API_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=0"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+    environment:
+      - CF_API_EMAIL=${CF_API_EMAIL}
+      - CF_API_KEY=${CF_API_KEY}
+    labels:
+      - "traefik.http.routers.reverse-proxy-rtr.rule=Host(`${DOMAIN_TRAEFIK}`)"
+      - "traefik.http.routers.reverse-proxy-rtr.entrypoints=https"
+      - "traefik.http.routers.reverse-proxy-rtr.tls=true"
+      - "traefik.http.routers.reverse-proxy-rtr.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.reverse-proxy-rtr.service=api@internal"
+ 
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+      - traefik-logs:/logs
+    networks:
+      - internet
+      
+  backend:
+    image: nam2507/foodrec:production
+    container_name: foodrec_backend
+    expose:
+      - 8080
+    labels:
+      - "traefik.http.routers.backend.rule=Host(`${DOMAIN_BACKEND}`)"
+      - "traefik.http.routers.backend.entrypoints=https"
+      - "traefik.http.routers.backend.tls=true"
+      - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.backend.service=backend"
+      - "traefik.http.services.backend.loadbalancer.server.port=8080"
+    restart: unless-stopped
+    environment:
+        SPRING_PROFILES_ACTIVE: production
+        SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${PG_DATABASE}
+        SPRING_DATASOURCE_USERNAME: ${PG_USERNAME}
+        SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
+        SPRING_REDIS_HOSTNAME: ${SPRING_REDIS_HOSTNAME}
+        SPRING_REDIS_PASSWORD: ${SPRING_REDIS_PASSWORD}
+        OPENAI_API_KEY: ${OPENAI_API_KEY}
+        OPENAI_API_URL: ${OPENAI_API_URL}
+        OPENAI_API_MODEL: ${OPENAI_API_MODEL}
+        OPENAI_API_MESSAGE: ${OPENAI_API_MESSAGE}
+        SPRING_ELASTICSEARCH_HOSTNAME: ${SPRING_ELASTICSEARCH_HOSTNAME}
+    depends_on:
+      - db
+      - redis-server
+      - elasticsearch
+    networks:
+      - internet
+
+  db:
+    image: postgres:15-alpine
+    container_name: foodrec_postgres
+    restart: unless-stopped
+    expose:
+      - 5432
+    environment:
+      - POSTGRES_USER=${PG_USERNAME}
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_DB=${PG_DATABASE}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - internet
+
+  redis-server:
+    image: redis:latest
+    hostname: ${SPRING_REDIS_HOSTNAME}
+    container_name: foodrec_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${SPRING_REDIS_PASSWORD}
+    networks:
+      - internet
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.11
+    hostname: ${SPRING_ELASTICSEARCH_HOSTNAME}
+    container_name: foodrec_elasticsearch
+    restart: always
+    environment:
+      - cluster.name=foodrec
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - 9200:9200
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - internet
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    user: root
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-logs:/prometheus/
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.size=512MB"
+    labels:
+      - "traefik.http.routers.prometheus.rule=Host(`${DOMAIN_PROMETHEUS}`)"
+      - "traefik.http.routers.prometheus.entrypoints=https"
+      - "traefik.http.routers.prometheus.tls=true"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prometheus.service=prometheus"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+    networks:
+      - internet
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./grafana:/etc/grafana/provisioning
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+      GF_COOKIE_SECURE: "true"
+    labels:
+      - "traefik.http.routers.grafana.rule=Host(`${DOMAIN_GRAFANA}`)"
+      - "traefik.http.routers.grafana.entrypoints=https"
+      - "traefik.http.routers.grafana.tls=true"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.grafana.service=grafana"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    networks:
+      - internet
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    expose:
+      - 8080
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro
+    labels:
+      - "org.label-schema.group=monitoring"
+    networks:
+      - internet
+
+  nodeexporter:
+    image: prom/node-exporter:v1.6.0
+    container_name: nodeexporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    expose:
+      - 9100
+    labels:
+      - "org.label-schema.group=monitoring"
+    networks:
+      - internet
+
+volumes:
+  pg_data:
+  esdata:
+  traefik-logs:
+  prom-logs:
+  grafana:
+
+networks:
+  internet: {}

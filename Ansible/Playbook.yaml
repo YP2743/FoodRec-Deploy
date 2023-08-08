@@ -1,0 +1,89 @@
+- hosts: all
+  name: Setup server
+  become: true
+  tasks:
+    - name: Check If Docker Is Installed
+      ansible.builtin.command: docker --version
+      register: docker_valid
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install packages to allow apt to use a repository over HTTPS
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: docker_valid.failed
+
+    - name: Get Ubuntu release version
+      ansible.builtin.command: lsb_release -cs
+      register: ubuntu_version
+      changed_when: false
+
+    - name: Get architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: architecture
+      changed_when: false
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ architecture.stdout }}] https://download.docker.com/linux/ubuntu {{ ubuntu_version.stdout }} stable"
+        state: present
+        filename: docker
+      when: docker_valid.failed
+
+    - name: Update apt packages
+      ansible.builtin.apt:
+        update_cache: "yes"
+        force_apt_get: "yes"
+
+    - name: Install Docker engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: true
+
+    - name: Copy prometheus configs
+      ansible.builtin.copy:
+        src: ../Prometheus/
+        dest: prometheus/
+        remote_src: false
+        directory_mode: '0755'
+        mode: '0755'
+
+    - name: Copy grafana configs
+      ansible.builtin.copy:
+        src: ../Grafana/
+        dest: grafana/
+        remote_src: false
+        directory_mode: '0755'
+        mode: '0755'
+    
+    - name: Copy .env file
+      ansible.builtin.copy:
+        src: ../FoodRec/.env
+        dest: .env
+        remote_src: false
+        mode: '0755'
+
+    - name: Copy docker compose file
+      ansible.builtin.copy:
+        src: ../FoodRec/docker-compose.yml
+        dest: docker-compose.yml
+        remote_src: false
+        mode: '0644'
+
+    - name: Run docker compose
+      ansible.builtin.command: docker compose --env-file .env -f docker-compose.yml up -d
+      changed_when: true
